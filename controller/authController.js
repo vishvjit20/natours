@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 const AppError = require('../utils/appError');
 const { promisify } = require('util');
 const sendEmail = require('../utils/email');
+const crypto = require('crypto');
 
 const signToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET, {
@@ -122,17 +123,58 @@ exports.forgotPassword = catchAsync(async (req, res, next) => {
   )}/api/v1/users/resetPassword/${resetToken}`;
 
   const message = `Forgot password ? Confirm passwword at ${resetURL}. Please ignore, if already done`;
+  try {
+    await sendEmail({
+      email: user.email,
+      subject: 'Password reset token, (valid for 10 mins)',
+      message,
+    });
 
-  await sendEmail({
-    email: user.email,
-    subject: 'Password reset token, (valid for 10 mins)',
-    message,
+    res.status(200).json({
+      status: 'success',
+      message: 'Token sent to mail successfully',
+    });
+  } catch (err) {
+    user.passwordResetToken = undefined;
+    user.passwordResetExpires = undefined;
+    await user.save({ validateBeforeSave: false });
+    return next(
+      new AppError(
+        'There was an error sending the email. Please try again later!',
+        500
+      )
+    );
+  }
+});
+
+exports.resetPassword = catchAsync(async (req, res, next) => {
+  // 1. Get user based on token
+  const hashedToken = crypto
+    .createHash('sha256')
+    .update(req.params.token)
+    .digest('hex');
+
+  const user = await User.findOne({
+    passwordResetToken: hashedToken,
+    passwordResetExpires: { $gt: Date.now() },
   });
+
+  // 2. If token is not expired and user is there, set new password
+  if (!user) return next(new AppError('Token is invalid or expired', 400));
+
+  user.password = req.body.password;
+  user.passwordConfirm = req.body.passwordConfirm;
+  user.passwordResetToken = undefined;
+  user.passwordResetExpires = undefined;
+  await user.save();
+
+  // 3. Update changedPasswordAt property for the user
+  // 4. Log in user, and send JWT
+
+  const token = signToken(user._id);
 
   res.status(200).json({
     status: 'success',
-    message: 'Token sent to mail successfully',
+    token,
   });
 });
-
-exports.resetPassword = (req, res, next) => {};
